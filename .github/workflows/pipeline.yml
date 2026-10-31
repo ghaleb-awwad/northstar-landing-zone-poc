@@ -1,0 +1,135 @@
+name: landing-zone
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths: ["config/**", "policies/**", "terraform/**", "src/**", ".github/workflows/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: landing-zone
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "20"
+  TERRAFORM_VERSION: "1.16.7"
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: terraform fmt
+        run: terraform fmt -check -recursive terraform
+      - name: terraform init + validate
+        run: |
+          npm run tf:init
+          terraform -chdir=terraform/organization validate
+          terraform -chdir=terraform/account validate
+      - name: lz validate
+        run: npm run lz -- validate
+      - name: lz plan
+        run: npm run lz -- plan
+
+  deploy-dev:
+    name: deploy dev
+    needs: checks
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: npm ci
+      - run: npm run tf:init
+      - name: lz apply --ring dev
+        run: npm run lz -- apply --ring dev
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lz-after-dev
+          path: .lz/
+          include-hidden-files: true
+          retention-days: 7
+
+  deploy-test:
+    name: deploy test
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: lz-after-dev
+          path: .lz/
+      - run: npm ci
+      - run: npm run tf:init
+      - name: lz apply --ring test
+        run: npm run lz -- apply --ring test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lz-after-test
+          path: .lz/
+          include-hidden-files: true
+          retention-days: 7
+
+  deploy-prod:
+    name: deploy prod
+    needs: deploy-test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: lz-after-test
+          path: .lz/
+      - run: npm ci
+      - run: npm run tf:init
+      - name: lz apply --ring prod --approve-prod
+        run: npm run lz -- apply --ring prod --approve-prod
+      - name: Compliance summary
+        run: npm run --silent lz -- evaluate --markdown >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lz-after-prod
+          path: .lz/
+          include-hidden-files: true
+          retention-days: 7

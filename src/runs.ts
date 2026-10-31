@@ -77,8 +77,10 @@ export function writeRun(run: Run, dir: string = defaultRunsDir): void {
       renameSync(tmp, target);
       return;
     } catch (e) {
-      // Windows can briefly refuse the rename while a reader has the file open.
-      if (attempt >= 5 || (e as NodeJS.ErrnoException).code !== 'EPERM') throw e;
+      // Windows can briefly lock the target (open reader, antivirus scan). Back off and retry.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '')) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
 }
