@@ -695,8 +695,10 @@ async function refresh() {
 }
 
 function route() {
-  const tab = location.hash.replace('#', '');
+  // Deep links: #pipeline, #accounts/ns-booking-prod (opens that account's detail panel).
+  const [tab, sub] = location.hash.replace('#', '').split('/');
   state.tab = VIEWS[tab] ? tab : 'overview';
+  if (state.tab === 'accounts' && sub) state.selectedAccount = decodeURIComponent(sub);
   for (const a of document.querySelectorAll('.tabs a')) a.classList.toggle('active', a.dataset.tab === state.tab);
   for (const id of Object.keys(VIEWS)) document.getElementById(`view-${id}`).hidden = id !== state.tab;
   refresh();
