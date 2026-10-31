@@ -77,6 +77,7 @@ effective settings = merge(global.defaults, environments/<env>.settings, account
 | `npm run lz -- drift` | `terraform plan -detailed-exitcode` per account: exit 2 = drifted |
 | `npm run lz -- evaluate [--markdown]` | Compliance per account against `policies/rules.yaml` |
 | `npm run demo:reset` | Reset the estate and undo the demo's config edits |
+| `npx tsx demo/dry-run.ts` | Rehearsal: runs and checks the full demo sequence against a running portal |
 | `npm test` / `npm run typecheck` | Unit tests / type check |
 
 ## CI/CD
