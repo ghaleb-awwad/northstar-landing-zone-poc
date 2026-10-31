@@ -12,3 +12,9 @@ core_accounts:
   - { id: "110000000002", name: ns-audit,           ou: Security }
   - { id: "120000000001", name: ns-network,         ou: Infrastructure }
   - { id: "120000000002", name: ns-shared-services, ou: Infrastructure }
+
+# Shared services every workload account is wired to (core account names).
+shared_services:
+  log_archive: ns-log-archive        # central CloudTrail / AWS Config log bucket
+  security_tooling: ns-audit         # delegated admin: GuardDuty, Security Hub, Inspector
+  network_hub: ns-network            # Transit Gateway owner, shared via AWS RAM

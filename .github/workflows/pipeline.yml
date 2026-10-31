@@ -4,47 +4,50 @@ on:
   pull_request:
   push:
     branches: [main]
-    paths: ["config/**", "policies/**", "terraform/**", "src/**", ".github/workflows/**"]
+    paths: ["config/**", "policies/**", "terraform/**", "src/**", ".github/**"]
+  schedule:
+    - cron: "0 3 * * *" # nightly drift detection (also catches expired governance exceptions)
   workflow_dispatch:
+    inputs:
+      task:
+        description: "deploy = full rollout; drift = drift detection, then reconcile after approval"
+        type: choice
+        options: [deploy, drift]
+        default: deploy
 
 permissions:
   contents: read
+  actions: read # restore the latest estate artifact
 
 concurrency:
   group: landing-zone
   cancel-in-progress: false
 
-env:
-  NODE_VERSION: "20"
-  TERRAFORM_VERSION: "1.16.7"
+# The estate (Terraform state + simulated AWS) is carried between runs as the `lz-estate` artifact.
+# It stands in for a remote backend (S3 + locking) and is uploaded even when a rollout fails,
+# so state always matches what was actually applied.
 
 jobs:
   checks:
     name: checks
+    if: github.event_name != 'schedule' && inputs.task != 'drift'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
-      - run: npm ci
+          restore-latest-estate: "true"
       - run: npm run typecheck
       - run: npm test
       - name: terraform fmt
         run: terraform fmt -check -recursive terraform
-      - name: terraform init + validate
+      - name: terraform validate
         run: |
-          npm run tf:init
           terraform -chdir=terraform/organization validate
           terraform -chdir=terraform/account validate
       - name: lz validate
         run: npm run lz -- validate
-      - name: lz plan
+      - name: lz plan (against the current estate)
         run: npm run lz -- plan
 
   deploy-dev:
@@ -54,19 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
-      - run: npm ci
-      - run: npm run tf:init
-      - name: lz apply --ring dev
+          restore-latest-estate: "true"
+      - name: lz apply --ring dev (organization/dev, then Dev accounts)
         run: npm run lz -- apply --ring dev
       - uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: lz-after-dev
           path: .lz/
@@ -79,23 +76,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
+      - uses: ./.github/actions/setup
       - uses: actions/download-artifact@v4
         with:
           name: lz-after-dev
           path: .lz/
-      - run: npm ci
-      - run: npm run tf:init
-      - name: lz apply --ring test
+      - name: lz apply --ring test (organization/test, then Test accounts)
         run: npm run lz -- apply --ring test
       - uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
           name: lz-after-test
           path: .lz/
@@ -106,30 +95,65 @@ jobs:
     name: deploy prod
     needs: deploy-test
     runs-on: ubuntu-latest
-    environment: production
+    environment: production # manual approval: covers Root/core SCPs and the Prod ring
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-          terraform_wrapper: false
+      - uses: ./.github/actions/setup
       - uses: actions/download-artifact@v4
         with:
           name: lz-after-test
           path: .lz/
-      - run: npm ci
-      - run: npm run tf:init
-      - name: lz apply --ring prod --approve-prod
-        run: npm run lz -- apply --ring prod --approve-prod
+      - name: lz apply --ring prod (organization/core + prod, canary first, then Prod accounts)
+        run: npm run lz -- apply --ring prod --approve-prod --approved-by "github-environment:production"
       - name: Compliance summary
+        if: success() || failure()
         run: npm run --silent lz -- evaluate --markdown >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: success() || failure()
         with:
-          name: lz-after-prod
+          name: lz-estate
           path: .lz/
           include-hidden-files: true
-          retention-days: 7
+          retention-days: 30
+
+  drift:
+    name: drift detection
+    if: github.event_name == 'schedule' || inputs.task == 'drift'
+    runs-on: ubuntu-latest
+    outputs:
+      drifted: ${{ steps.drift.outputs.drifted }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          restore-latest-estate: "true"
+      - name: lz drift (organization stages + every account)
+        id: drift
+        run: npm run lz -- drift
+      - name: Compliance summary
+        if: success() || failure()
+        run: npm run --silent lz -- evaluate --markdown >> "$GITHUB_STEP_SUMMARY"
+
+  reconcile:
+    name: reconcile drift
+    needs: drift
+    if: needs.drift.outputs.drifted != '0'
+    runs-on: ubuntu-latest
+    environment: production # re-applying Git also touches Prod: same approval as a deployment
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          restore-latest-estate: "true"
+      - name: lz apply (all rings) to bring the estate back to Git
+        run: npm run lz -- apply --approve-prod --approved-by "github-environment:production"
+      - name: Compliance summary
+        if: success() || failure()
+        run: npm run --silent lz -- evaluate --markdown >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: lz-estate
+          path: .lz/
+          include-hidden-files: true
+          retention-days: 30

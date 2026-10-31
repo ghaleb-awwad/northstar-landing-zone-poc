@@ -4,6 +4,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import {
   ACCOUNT_NAME,
+  APPROVER,
   ConfigError,
   effectiveSettings,
   ENVIRONMENTS,
@@ -13,6 +14,7 @@ import {
   type Account,
   type Config,
   type EnvName,
+  type GovernanceException,
 } from './config.js';
 import { demoMode, loadEnv, repoRoot } from './env.js';
 import { readAccountEstate, readOrganization, tamper } from './estate.js';
@@ -45,6 +47,8 @@ interface AccountRow {
   environment: EnvName;
   ou: string;
   managedBy: string;
+  synthetic: boolean;
+  canary: boolean;
   lastDeployment: { runId: string; at: string; status: string } | null;
   compliance: { score: number | null; pass: number; fail: number; excepted: number; deployed: boolean };
   drift: { status: DriftState; components: string[]; at: string | null };
@@ -107,6 +111,8 @@ function snapshot(): Snapshot {
         environment: account.environment,
         ou: config.environments[account.environment].ou,
         managedBy,
+        synthetic: account.synthetic === true,
+        canary: account.canary === true,
         lastDeployment: lastDeployment(runs, account.name),
         compliance: { score: result.score, pass: result.pass, fail: result.fail, excepted: result.excepted, deployed: result.deployed },
         drift: driftState(runs, account.name, managedBy === 'landing-zone'),
@@ -125,6 +131,16 @@ function findAccount(config: Config, name: string): Account {
   const account = ACCOUNT_NAME.test(name) ? config.accounts[name] : undefined;
   if (!account) throw new HttpError(404, `Unknown account: ${name}`);
   return account;
+}
+
+/** Exceptions expiring within this many days are flagged on the Overview. */
+const EXPIRY_WARNING_DAYS = 30;
+
+function exceptionStatus(e: GovernanceException, now = new Date()) {
+  const daysRemaining = Math.ceil((Date.parse(`${e.expires}T23:59:59Z`) - now.getTime()) / 86_400_000);
+  const active = isExceptionActive(e, now);
+  const state = !active ? 'EXPIRED' : daysRemaining <= EXPIRY_WARNING_DAYS ? 'EXPIRING' : 'ACTIVE';
+  return { ...e, active, daysRemaining, state };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +209,8 @@ const RunRequest = z
     kind: z.enum(['deploy', 'drift']),
     includeProd: z.boolean().optional(),
     account: z.string().regex(ACCOUNT_NAME).optional(),
+    /** Required for anything that deploys to Prod; recorded in the run file. */
+    approvedBy: z.string().trim().regex(APPROVER, 'must be 2-60 characters: letters, digits, space . _ @ : / ( ) -').optional(),
   })
   .strict();
 const TamperRequest = z.object({ account: z.string().regex(ACCOUNT_NAME) }).strict();
@@ -211,15 +229,21 @@ app.get('/api/summary', (req, res) => {
   const { rows, runs, config } = snapshot();
   const deployed = rows.filter((r) => r.compliance.deployed);
   const latest = runs[0];
+  const exceptions = config.exceptions.map((e) => exceptionStatus(e));
   res.json({
     accounts: rows.length,
+    synthetic: rows.filter((r) => r.synthetic).length,
     managed: rows.filter((r) => r.managedBy === 'landing-zone').length,
     legacy: rows.filter((r) => r.managedBy === 'manual').length,
     notDeployed: rows.filter((r) => !r.compliance.deployed).length,
     compliance: ratio(deployed),
     nonCompliant: rows.filter((r) => r.compliance.fail > 0).length,
     drifted: rows.filter((r) => r.drift.status === 'DRIFTED').length,
-    activeExceptions: config.exceptions.filter((e) => isExceptionActive(e)).length,
+    activeExceptions: exceptions.filter((e) => e.active).length,
+    exceptionAlerts: exceptions
+      .filter((e) => e.state !== 'ACTIVE')
+      .map((e) => ({ id: e.id, account: e.account, rule: e.rule, expires: e.expires, state: e.state, daysRemaining: e.daysRemaining })),
+    organizationStages: readOrganization()?.stages ?? [],
     lastRun: latest ? { runId: latest.runId, kind: latest.kind, status: latest.status, startedAt: latest.startedAt } : null,
     activeRunId: active?.runId ?? null,
     demoMode: demoMode(),
@@ -274,7 +298,7 @@ app.get('/api/accounts/:name', (req, res) => {
     scps: effectiveScps(org, account.name, account.account_id),
     exceptions: snap.config.exceptions
       .filter((e) => e.account === account.name)
-      .map((e) => ({ ...e, active: isExceptionActive(e) })),
+      .map((e) => exceptionStatus(e)),
   });
 });
 
@@ -319,23 +343,22 @@ app.get('/api/governance', (req, res) => {
     ],
   }));
 
-  const today = Date.now();
+  const deployedOrg = readOrganization();
+  const coreName = (name: string) => org.core_accounts.find((a) => a.name === name);
   res.json({
     environments: ENVIRONMENTS,
     comparison: rows,
     ous,
-    organizationDeployed: readOrganization() !== undefined,
+    organizationDeployed: deployedOrg !== undefined,
+    organizationStages: deployedOrg?.stages ?? [],
+    sharedServices: Object.entries(org.shared_services).map(([role, name]) => ({ role, account: name, id: coreName(name)?.id ?? null })),
     globalStandards: {
       allowedRegions: config.global.allowed_regions,
       mandatoryTags: config.global.mandatory_tags,
       securityServices: config.global.security_services,
       hardening: config.global.hardening,
     },
-    exceptions: config.exceptions.map((e) => ({
-      ...e,
-      active: isExceptionActive(e),
-      daysRemaining: Math.ceil((Date.parse(`${e.expires}T23:59:59Z`) - today) / 86_400_000),
-    })),
+    exceptions: config.exceptions.map((e) => exceptionStatus(e)),
     rules: config.rules.map((r) => ({ id: r.id, title: r.title, environments: r.environments, severity: r.severity })),
   });
 });
@@ -370,17 +393,24 @@ app.post('/api/runs', (req, res) => {
   const config = loadConfig();
 
   const args: string[] = [];
+  let touchesProd = false;
   if (body.kind === 'drift') {
-    if (body.account || body.includeProd) throw new HttpError(400, 'Drift detection runs for all accounts');
+    if (body.account || body.includeProd || body.approvedBy) throw new HttpError(400, 'Drift detection runs for all accounts');
     args.push('drift');
   } else if (body.account) {
     const account = findAccount(config, body.account);
     args.push('apply', '--account', account.name);
-    // Re-apply of a single account is an explicit user action, so it counts as Prod approval.
-    if (account.environment === 'prod') args.push('--approve-prod');
+    touchesProd = account.environment === 'prod';
   } else {
     args.push('apply');
-    if (body.includeProd) args.push('--approve-prod');
+    touchesProd = body.includeProd === true;
+  }
+  if (touchesProd) {
+    // Same gate as CI: Prod (and Root/core SCPs) only with a named approver, recorded in the run file.
+    if (!body.approvedBy) throw new HttpError(403, 'Production approval required: approvedBy is missing');
+    args.push('--approve-prod', `--approved-by=${body.approvedBy}`);
+  } else if (body.approvedBy) {
+    throw new HttpError(400, 'approvedBy is only accepted for Prod deployments');
   }
 
   const runId = newRunId();

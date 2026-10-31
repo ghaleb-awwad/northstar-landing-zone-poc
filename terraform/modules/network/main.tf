@@ -12,6 +12,10 @@ variable "account_id" { type = string }
 variable "cidr_pool" { type = string }
 variable "allow_public_ip" { type = bool }
 variable "tgw_route_table" { type = string }
+variable "tgw_owner_id" {
+  description = "Core account that owns the shared Transit Gateway (shared via AWS RAM)."
+  type        = string
+}
 
 variable "network_index" {
   type = number
@@ -28,5 +32,6 @@ resource "local_file" "network" {
     vpc_cidr        = cidrsubnet(var.cidr_pool, 8, var.network_index)
     public_subnets  = var.allow_public_ip
     tgw_route_table = var.tgw_route_table
+    tgw_owner       = var.tgw_owner_id
   })
 }

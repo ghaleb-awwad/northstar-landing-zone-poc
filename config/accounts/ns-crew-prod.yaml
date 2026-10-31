@@ -4,4 +4,6 @@ owner: crew-platform@northstar.example
 business_unit: crew-operations
 cost_center: CC-4412
 network_index: 1
+# Canary: deployed first in the Prod ring; the rest of Prod waits for it.
+canary: true
 overrides: {}

@@ -5,7 +5,8 @@ import { runsDir as defaultRunsDir } from './env.js';
 
 export type RunKind = 'deploy' | 'drift';
 export type RunTrigger = 'cli' | 'portal' | 'ci';
-export type RunStatus = 'RUNNING' | 'SUCCEEDED' | 'HALTED' | 'FAILED';
+/** PARTIAL: everything that ran succeeded, but Prod was skipped because it was not approved. */
+export type RunStatus = 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'HALTED' | 'FAILED';
 export type StepStatus = 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED';
 export type DriftStatus = 'IN_SYNC' | 'DRIFTED' | 'ERROR';
 
@@ -20,21 +21,37 @@ export interface AccountStep {
   accountId: string;
   status: StepStatus;
   attempts: number;
+  canary?: boolean;
   changes?: Changes;
   durationMs?: number;
   error?: string;
   finishedAt?: string;
 }
 
+/** One organization stage (workspace of terraform/organization): core, dev, test or prod. */
+export interface OrgStep {
+  stage: string;
+  status: StepStatus;
+  changes?: Changes;
+  durationMs?: number;
+  error?: string;
+}
+
 export interface Ring {
   name: string;
   status: StepStatus;
+  /** Why the ring was skipped, e.g. awaiting production approval. */
+  reason?: string;
+  /** Organization stages applied at the start of this ring (empty for single-account runs). */
+  organization: OrgStep[];
   accounts: AccountStep[];
 }
 
 export interface DriftResult {
+  /** Account name, or organization/<stage>. */
   name: string;
   accountId: string;
+  kind?: 'account' | 'organization';
   status: DriftStatus;
   components: string[];
   error?: string;
@@ -47,8 +64,7 @@ export interface Run {
   status: RunStatus;
   startedAt: string;
   finishedAt?: string;
-  options: { ring?: string; account?: string; approveProd?: boolean };
-  organization?: { status: StepStatus; changes?: Changes; durationMs?: number; error?: string };
+  options: { ring?: string; account?: string; approveProd?: boolean; approvedBy?: string };
   rings: Ring[];
   drift?: DriftResult[];
   error?: string;

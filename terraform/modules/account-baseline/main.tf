@@ -17,6 +17,14 @@ variable "security_services" { type = map(bool) }
 variable "hardening" { type = map(bool) }
 variable "allowed_regions" { type = list(string) }
 variable "tags" { type = map(string) }
+variable "log_archive_id" {
+  description = "Core account that receives CloudTrail and AWS Config logs."
+  type        = string
+}
+variable "security_admin_id" {
+  description = "Delegated administrator for GuardDuty, Security Hub and Inspector."
+  type        = string
+}
 
 resource "local_file" "baseline" {
   filename = "${var.estate_dir}/accounts/${var.account_id}/baseline.json"
@@ -31,7 +39,8 @@ resource "local_file" "baseline" {
     tags              = var.tags
     settings          = var.settings
     setting_sources   = var.setting_sources
-    logging           = { retention_days = var.settings.log_retention_days }
+    logging           = { retention_days = var.settings.log_retention_days, destination_account = var.log_archive_id }
+    security_admin    = var.security_admin_id
     backup            = { enabled = var.settings.backup_required }
     budget            = { limit_usd = var.settings.budget_usd }
   })

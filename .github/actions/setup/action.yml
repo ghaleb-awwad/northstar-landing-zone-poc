@@ -1,0 +1,39 @@
+name: setup
+description: Node, Terraform, dependencies, terraform init and (optionally) the estate from the latest run.
+
+inputs:
+  restore-latest-estate:
+    description: >
+      Download the newest `lz-estate` artifact (state + simulated estate) from an earlier run.
+      Stands in for a remote backend (S3) in this PoC, so drift and plans compare against the real estate.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+        cache: npm
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.16.7"
+        terraform_wrapper: false
+    - shell: bash
+      run: npm ci
+    - shell: bash
+      run: npm run tf:init
+    - name: Restore estate from the latest run
+      if: inputs.restore-latest-estate == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=lz-estate&per_page=20" \
+          --jq '[.artifacts[] | select(.expired == false)][0].workflow_run.id // empty')
+        if [ -n "$run_id" ]; then
+          gh run download "$run_id" --name lz-estate --dir .lz
+          echo "Restored estate from run $run_id."
+        else
+          echo "No earlier estate found: starting from an empty estate."
+        fi

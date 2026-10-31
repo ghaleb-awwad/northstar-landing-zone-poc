@@ -9,7 +9,8 @@ const state = {
   envFilter: null,
   selectedAccount: null,
   selectedRunId: null,
-  includeProd: true,
+  includeProd: false,
+  approver: '',
   tamperAccount: 'ns-crew-prod',
   active: false,
   summary: null,
@@ -27,7 +28,7 @@ function el(tag, attrs = {}, ...children) {
     else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
     else node.setAttribute(k, v === true ? '' : String(v));
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     node.append(c instanceof Node ? c : String(c));
   }
@@ -37,7 +38,7 @@ function el(tag, attrs = {}, ...children) {
 const STATUS_CLASS = {
   PASS: 'pass', SUCCEEDED: 'pass', IN_SYNC: 'pass', ACTIVE: 'pass', ON: 'pass',
   FAIL: 'fail', FAILED: 'fail', DRIFTED: 'fail', ERROR: 'fail', HALTED: 'fail', EXPIRED: 'fail', OFF: 'fail',
-  EXCEPTED: 'excepted',
+  EXCEPTED: 'excepted', PARTIAL: 'excepted', EXPIRING: 'excepted',
   RUNNING: 'running', RETRYING: 'running',
   SKIPPED: 'neutral', NOT_DEPLOYED: 'neutral', 'N/A': 'neutral', PENDING: 'neutral', UNKNOWN: 'neutral',
 };
@@ -100,12 +101,64 @@ function table(headers, rows) {
 
 function setView(id, ...children) {
   const view = document.getElementById(`view-${id}`);
-  view.replaceChildren(...children);
+  view.replaceChildren(...children.filter((c) => c !== null && c !== undefined));
 }
 
 // ---------- actions ----------
 
+/** Same gate as CI: anything touching Prod (or Root/core SCPs) needs a named approver. Resolves to the name or null. */
+function askProdApproval(what) {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = el('input', { type: 'text', value: state.approver, placeholder: 'Your name', 'aria-label': 'Approver name', maxlength: 60, required: true });
+    const dialog = el('dialog', { class: 'approval', 'aria-label': 'Production approval' });
+    const close = (value) => {
+      if (done) return;
+      done = true;
+      if (dialog.open) dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    dialog.append(
+      el(
+        'form',
+        {
+          onsubmit: (e) => {
+            e.preventDefault();
+            const who = input.value.trim();
+            if (!who) return;
+            state.approver = who;
+            close(who);
+          },
+        },
+        el('h3', { text: 'Production approval required' }),
+        el('p', { text: what }),
+        el('label', { class: 'approver' }, 'Approver (recorded in the run)', input),
+        el(
+          'div',
+          { class: 'toolbar' },
+          el('button', { type: 'submit', class: 'primary', text: 'Approve and run' }),
+          el('button', { type: 'button', text: 'Cancel', onclick: () => close(null) }),
+        ),
+      ),
+    );
+    dialog.addEventListener('cancel', () => close(null));
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+  });
+}
+
 async function startRun(body, message) {
+  if ((body.kind === 'deploy' && body.includeProd) || body.prod) {
+    const what = body.account
+      ? `Re-apply ${body.account} (Prod).`
+      : 'Deploy Dev and Test, then Root/core SCPs and the Prod ring (canary first).';
+    const approvedBy = await askProdApproval(what);
+    if (!approvedBy) return toast('Prod deployment cancelled: no approval given', true);
+    body = { ...body, approvedBy };
+  }
+  delete body.prod;
   try {
     const { runId } = await api('/api/runs', { method: 'POST', body });
     state.selectedRunId = null;
@@ -141,11 +194,11 @@ async function renderOverview() {
   const cards = el(
     'div',
     { class: 'cards' },
-    card('Accounts', big(String(s.accounts)), `${s.managed} managed · ${s.legacy} legacy · ${s.notDeployed} not deployed`),
+    card('Accounts', big(String(s.accounts)), `${s.managed} managed · ${s.legacy} legacy · ${s.notDeployed} not deployed${s.synthetic ? ` · ${s.synthetic} synthetic` : ''}`),
     card('Estate compliance', big(pct(s.compliance)), 'PASS / (PASS + FAIL), deployed accounts', s.compliance === null ? '' : s.compliance >= 0.95 ? 'good' : 'alert'),
     card('Non-compliant accounts', big(String(s.nonCompliant)), 'at least one rule failing', s.nonCompliant > 0 ? 'alert' : 'good'),
     card('Drifted accounts', big(String(s.drifted)), 'from the latest drift check', s.drifted > 0 ? 'alert' : 'good'),
-    card('Active exceptions', big(String(s.activeExceptions)), 'time-bound, see Governance'),
+    card('Active exceptions', big(String(s.activeExceptions)), s.exceptionAlerts.length ? `${s.exceptionAlerts.length} expiring or expired` : 'time-bound, see Governance', s.exceptionAlerts.length ? 'alert' : ''),
     card(
       'Last pipeline run',
       el('div', { class: 'value' }, last ? badge(last.status) : el('span', { class: 'muted', text: 'none' })),
@@ -153,8 +206,12 @@ async function renderOverview() {
     ),
   );
 
+  const LIMIT = 12;
+  const worstFirst = (a, b) =>
+    (b.compliance.deployed ? b.compliance.fail : -1) - (a.compliance.deployed ? a.compliance.fail : -1) || a.name.localeCompare(b.name);
   const envPanels = s.byEnvironment.map((e) => {
-    const envAccounts = accounts.filter((a) => a.environment === e.environment);
+    const envAccounts = accounts.filter((a) => a.environment === e.environment).sort(worstFirst);
+    const shown = envAccounts.slice(0, LIMIT);
     return el(
       'div',
       { class: 'panel' },
@@ -168,7 +225,7 @@ async function renderOverview() {
       el(
         'div',
         {},
-        envAccounts.map((a) =>
+        shown.map((a) =>
           el(
             'div',
             { class: 'env-bar' },
@@ -179,11 +236,34 @@ async function renderOverview() {
               : badge('NOT_DEPLOYED'),
           ),
         ),
+        envAccounts.length > LIMIT
+          ? el('div', { class: 'small muted', text: `+ ${envAccounts.length - LIMIT} more (worst first; see Accounts)` })
+          : null,
       ),
     );
   });
 
-  setView('overview', cards, el('h2', { text: 'Compliance by environment' }), el('div', { class: 'grid-3' }, envPanels));
+  const alerts = s.exceptionAlerts.length
+    ? panel(
+        'Governance exceptions needing action',
+        table(
+          ['ID', 'Account', 'Rule', 'Expires', 'Status'],
+          s.exceptionAlerts.map((x) =>
+            el(
+              'tr',
+              {},
+              el('td', { class: 'mono', text: x.id }),
+              el('td', { class: 'mono', text: x.account }),
+              el('td', { class: 'mono', text: x.rule }),
+              el('td', { class: 'small', text: x.expires }),
+              el('td', {}, badge(x.state, x.state === 'EXPIRED' ? 'EXPIRED: re-apply to enforce' : `EXPIRING in ${x.daysRemaining} days`)),
+            ),
+          ),
+        ),
+      )
+    : null;
+
+  setView('overview', cards, alerts, el('h2', { text: 'Compliance by environment' }), el('div', { class: 'grid-3' }, envPanels));
 }
 
 // ---------- Accounts ----------
@@ -217,7 +297,7 @@ async function renderAccounts() {
           refresh();
         },
       },
-      el('td', {}, el('strong', { text: a.name }), el('div', { class: 'small muted mono', text: a.accountId })),
+      el('td', {}, el('strong', { text: a.name }), a.canary ? [' ', el('span', { class: 'chip', text: 'canary' })] : null, el('div', { class: 'small muted mono', text: `${a.accountId}${a.synthetic ? ' · synthetic' : ''}` })),
       el('td', {}, envBadge(a.environment)),
       el('td', { class: 'mono', text: a.ou }),
       el('td', {}, badge(a.managedBy === 'landing-zone' ? 'PASS' : a.managedBy === 'manual' ? 'FAIL' : 'NOT_DEPLOYED', a.managedBy)),
@@ -266,7 +346,7 @@ async function renderAccountDetail(name) {
       text: 'Re-apply',
       title: `Runs lz apply --account ${d.name}`,
       disabled: state.active,
-      onclick: () => startRun({ kind: 'deploy', account: d.name }, `Re-applying ${d.name}`),
+      onclick: () => startRun({ kind: 'deploy', account: d.name, prod: d.environment === 'prod' }, `Re-applying ${d.name}`),
     }),
   );
 
@@ -355,9 +435,11 @@ function renderRun(run) {
     badge(run.status),
     el('span', { class: 'small muted', text: `trigger: ${run.trigger} · started ${time(run.startedAt)}${run.finishedAt ? ` · ${duration(run.startedAt, run.finishedAt)}` : ''}` }),
     run.options && run.options.account ? el('span', { class: 'chip', text: `--account ${run.options.account}` }) : null,
-    run.options && run.options.approveProd ? el('span', { class: 'chip', text: '--approve-prod' }) : null,
+    run.options && run.options.approveProd
+      ? el('span', { class: 'chip', text: `Prod approved${run.options.approvedBy ? ` by ${run.options.approvedBy}` : ''}` })
+      : null,
   );
-  const error = run.error ? el('div', { class: 'tile t-fail' }, el('div', { class: 'err', text: run.error })) : null;
+  const error = run.error ? el('div', { class: `tile t-${cls(run.status)}` }, el('div', { class: 'err', text: run.error })) : null;
 
   if (run.kind === 'drift') {
     const tiles = (run.drift || []).map((d) =>
@@ -366,9 +448,28 @@ function renderRun(run) {
     return panel(null, head, error, tiles.length ? el('div', { class: 'drift-grid' }, tiles) : el('div', { class: 'empty', text: run.status === 'RUNNING' ? 'Planning…' : 'No deployed accounts to check.' }));
   }
 
-  const org = run.organization
-    ? el('div', { class: 'stage-org' }, tile('Organization: OU tree + SCPs', run.organization.status, [changes(run.organization.changes), secs(run.organization.durationMs)], run.organization.error))
-    : null;
+  // At scale, a ring shows counts plus only the accounts worth looking at.
+  const COMPACT_AT = 16;
+  const accountTile = (a) =>
+    tile(
+      a.canary ? `${a.name} · canary` : a.name,
+      a.status,
+      [a.attempts ? `attempts ${a.attempts}` : '', changes(a.changes), secs(a.durationMs)],
+      a.status === 'SUCCEEDED' ? null : a.error,
+    );
+  const ringAccounts = (ring) => {
+    if (!ring.accounts.length) return [el('div', { class: 'empty', text: 'No accounts' })];
+    if (ring.accounts.length <= COMPACT_AT) return ring.accounts.map(accountTile);
+    const counts = {};
+    for (const a of ring.accounts) counts[a.status] = (counts[a.status] || 0) + 1;
+    const notable = ring.accounts.filter((a) => a.canary || a.attempts > 1 || ['RUNNING', 'RETRYING', 'FAILED'].includes(a.status));
+    const firstSkipped = ring.accounts.find((a) => a.status === 'SKIPPED' && a.error);
+    return [
+      el('div', { class: 'ring-counts' }, `${ring.accounts.length} accounts: `, Object.entries(counts).map(([st, n]) => [badge(st, `${n} ${label(st)}`), ' '])),
+      firstSkipped ? el('div', { class: 'small muted', text: firstSkipped.error }) : null,
+      ...notable.slice(0, COMPACT_AT).map(accountTile),
+    ];
+  };
 
   const rings = el(
     'div',
@@ -382,16 +483,23 @@ function renderRun(run) {
         el(
           'div',
           { class: 'ring-body' },
-          ring && ring.accounts.length
-            ? ring.accounts.map((a) =>
-                tile(a.name, a.status, [a.attempts ? `attempts ${a.attempts}` : '', changes(a.changes), secs(a.durationMs)], a.status === 'SUCCEEDED' ? null : a.error),
+          ring && ring.reason ? el('div', { class: 'tile t-excepted' }, el('div', { class: 'err', text: ring.reason })) : null,
+          ring
+            ? (ring.organization || []).map((o) =>
+                tile(
+                  `organization/${o.stage}`,
+                  o.status,
+                  [o.stage === 'core' ? 'Root + shared OU SCPs' : 'OU SCP + account placement', changes(o.changes), secs(o.durationMs)],
+                  o.error,
+                ),
               )
-            : el('div', { class: 'empty', text: ring ? 'No accounts' : '–' }),
+            : null,
+          ring ? ringAccounts(ring) : el('div', { class: 'empty', text: '–' }),
         ),
       );
     }),
   );
-  return panel(null, head, error, org, rings);
+  return panel(null, head, error, rings);
 }
 
 async function renderPipeline() {
@@ -413,7 +521,7 @@ async function renderPipeline() {
       'label',
       { class: 'check' },
       el('input', { type: 'checkbox', checked: state.includeProd, onchange: (e) => (state.includeProd = e.target.checked) }),
-      'Include Prod (approval)',
+      'Include Root/core + Prod (needs approval)',
     ),
     el('button', { text: 'Detect drift', disabled: busy, onclick: () => startRun({ kind: 'drift' }, 'Drift detection started') }),
     el('span', { class: 'spacer' }),
@@ -500,7 +608,12 @@ async function renderGovernance() {
             el('span', { class: 'ou-name', text: ou.name }),
             ' ',
             ou.scp.length ? ou.scp.map((s) => el('span', { class: 'chip', text: s })) : el('span', { class: 'small muted', text: 'inherits only' }),
-            ou.accounts.length ? el('div', { class: 'ou-accounts', text: ou.accounts.join(', ') }) : null,
+            ou.accounts.length
+              ? el('div', {
+                  class: 'ou-accounts',
+                  text: ou.accounts.length > 10 ? `${ou.accounts.slice(0, 10).join(', ')} + ${ou.accounts.length - 10} more` : ou.accounts.join(', '),
+                })
+              : null,
           ),
           byParent(ou.name).length ? tree(ou.name) : null,
         ),
@@ -514,6 +627,12 @@ async function renderGovernance() {
     'div',
     {},
     el('dl', { class: 'kv' }, el('dt', { text: 'Allowed regions' }), el('dd', { text: g.globalStandards.allowedRegions.join(', ') }), el('dt', { text: 'Mandatory tags' }), el('dd', { text: g.globalStandards.mandatoryTags.join(', ') })),
+    el('h3', { text: 'Shared services (core accounts)' }),
+    el(
+      'dl',
+      { class: 'kv' },
+      g.sharedServices.flatMap((s) => [el('dt', { text: s.role.replace(/_/g, ' ') }), el('dd', { text: `${s.account} (${s.id})` })]),
+    ),
     el('h3', { text: 'Security services' }),
     onOff(g.globalStandards.securityServices),
     el('h3', { text: 'Hardening' }),
@@ -530,7 +649,7 @@ async function renderGovernance() {
       el('td', { class: 'small', text: e.reason }),
       el('td', { class: 'small', text: e.approved_by }),
       el('td', { class: 'small', text: e.expires }),
-      el('td', {}, badge(e.active ? 'EXCEPTED' : 'EXPIRED', e.active ? `ACTIVE · ${e.daysRemaining} days left` : 'EXPIRED')),
+      el('td', {}, badge(e.state, e.state === 'EXPIRED' ? 'EXPIRED' : `${e.state} · ${e.daysRemaining} days left`)),
     ),
   );
 
@@ -544,7 +663,10 @@ async function renderGovernance() {
     el(
       'div',
       { class: 'grid-2' },
-      panel(`OU tree and SCPs${g.organizationDeployed ? '' : ' (not deployed yet)'}`, tree(null)),
+      panel(
+        `OU tree and SCPs${g.organizationDeployed ? ` (deployed stages: ${g.organizationStages.join(', ')})` : ' (not deployed yet)'}`,
+        tree(null),
+      ),
       panel('Organization-wide standards (config/global.yaml)', standards),
     ),
     panel('Governance exceptions (config/exceptions.yaml)', table(['ID', 'Account', 'Rule / SCP', 'Reason', 'Approved by', 'Expires', 'Status'], exceptions)),

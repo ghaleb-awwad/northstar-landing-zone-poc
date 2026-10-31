@@ -47,9 +47,18 @@ await step('overview: 2 legacy, 4 not deployed', async () => {
 });
 
 await step('run pipeline (include prod), retry on booking-test', async () => {
-  const run = await waitRun((await api('/api/runs', { kind: 'deploy', includeProd: true })).runId);
+  const refused = await fetch(`${BASE}/api/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'deploy', includeProd: true }),
+  });
+  check(refused.status === 403, `prod without approver should be refused, got ${refused.status}`);
+  const run = await waitRun((await api('/api/runs', { kind: 'deploy', includeProd: true, approvedBy: 'dry-run' })).runId);
   const bt = run.rings.flatMap((r: any) => r.accounts).find((a: any) => a.name === 'ns-booking-test');
+  const prod = run.rings.find((r: any) => r.name === 'prod');
   check(run.status === 'SUCCEEDED', `deploy ${run.status}`);
+  check(run.options.approvedBy === 'dry-run', `approvedBy ${run.options.approvedBy}`);
+  check(prod.organization.map((o: any) => o.stage).join() === 'core,prod', `prod org stages ${prod.organization.map((o: any) => o.stage)}`);
   check(bt.attempts === 2, `booking-test attempts ${bt.attempts} (is LZ_SIMULATE_TRANSIENT set?)`);
 });
 
@@ -63,7 +72,7 @@ await step('inspector: true + onboard ns-cargo-dev, run', async () => {
   const g = path.join(configDir, 'global.yaml');
   writeFileSync(g, readFileSync(g, 'utf8').replace('inspector: false', 'inspector: true'));
   copyFileSync(path.join(repoRoot, 'demo', 'ns-cargo-dev.yaml'), path.join(configDir, 'accounts', 'ns-cargo-dev.yaml'));
-  const run = await waitRun((await api('/api/runs', { kind: 'deploy', includeProd: true })).runId);
+  const run = await waitRun((await api('/api/runs', { kind: 'deploy', includeProd: true, approvedBy: 'dry-run' })).runId);
   const s = await api('/api/summary');
   check(run.status === 'SUCCEEDED' && s.accounts === 7 && s.nonCompliant === 0, `status=${run.status} accounts=${s.accounts} nonCompliant=${s.nonCompliant}`);
 });
@@ -76,7 +85,7 @@ await step('simulate manual change + detect drift', async () => {
 });
 
 await step('re-apply ns-crew-prod', async () => {
-  await waitRun((await api('/api/runs', { kind: 'deploy', account: 'ns-crew-prod' })).runId);
+  await waitRun((await api('/api/runs', { kind: 'deploy', account: 'ns-crew-prod', approvedBy: 'dry-run' })).runId);
   const a = await api('/api/accounts/ns-crew-prod');
   check(a.drift.status === 'IN_SYNC' && a.compliance.fail === 0, `drift=${a.drift.status} fail=${a.compliance.fail}`);
 });

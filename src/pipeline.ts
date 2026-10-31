@@ -1,11 +1,19 @@
 import pLimit from 'p-limit';
-import { ENVIRONMENTS, type Account, type Config, type EnvName } from './config.js';
+import { ENVIRONMENTS, ORG_STAGES, type Account, type Config, type EnvName, type OrgStage } from './config.js';
 import { runsDir as defaultRunsDir } from './env.js';
 import type { TfRunner } from './terraform.js';
-import { writeRun, type AccountStep, type DriftResult, type Ring, type Run, type RunTrigger } from './runs.js';
+import { writeRun, type AccountStep, type DriftResult, type OrgStep, type Ring, type Run, type RunTrigger } from './runs.js';
 
 export const MAX_PARALLEL = 3;
 export const MAX_ATTEMPTS = 2;
+/** A wave stops starting new accounts once more than this share of it has failed. */
+export const FAILURE_BUDGET = 0.1;
+
+/**
+ * Organization stages applied at the start of each ring. Environment OU SCPs follow their ring.
+ * Root and the shared OUs ("core") affect every account, so they wait for the Prod approval.
+ */
+export const ORG_STAGES_BY_RING: Record<EnvName, OrgStage[]> = { dev: ['dev'], test: ['test'], prod: ['core', 'prod'] };
 
 interface Common {
   config: Config;
@@ -13,6 +21,7 @@ interface Common {
   runId: string;
   trigger: RunTrigger;
   runsDir?: string;
+  maxParallel?: number;
   log?: (message: string) => void;
 }
 
@@ -20,6 +29,8 @@ export interface DeployOptions extends Common {
   ring?: EnvName;
   account?: string;
   approveProd: boolean;
+  /** Recorded in the run file when Prod is approved. */
+  approvedBy?: string;
   retryDelayMs?: number;
   /** Accounts whose first attempt fails with a simulated transient error (demo mode only). */
   simulateTransient?: string[];
@@ -43,22 +54,36 @@ function accountsByRing(config: Config, opts: Pick<DeployOptions, 'ring' | 'acco
   }));
 }
 
-function skipFrom(rings: Ring[], index: number): void {
+function skipSteps(steps: AccountStep[], reason: string): void {
+  for (const s of steps) {
+    if (s.status !== 'PENDING') continue;
+    s.status = 'SKIPPED';
+    s.error = reason;
+  }
+}
+
+function skipFrom(rings: Ring[], index: number, reason?: string): void {
   for (const ring of rings.slice(index)) {
     ring.status = 'SKIPPED';
-    for (const a of ring.accounts) a.status = 'SKIPPED';
+    if (reason) ring.reason = reason;
+    for (const o of ring.organization) if (o.status === 'PENDING') o.status = 'SKIPPED';
+    skipSteps(ring.accounts, reason ?? 'Earlier stage failed');
   }
 }
 
 /**
- * Rollout: organization stage, then rings dev -> test -> prod.
- * Max 3 accounts in parallel, one retry per account, a failed ring halts later rings,
- * prod only with explicit approval.
+ * Rollout, ring by ring (dev -> test -> prod). Each ring:
+ *   1. applies its organization stage(s): the environment OU's SCPs (Prod also: Root/core),
+ *   2. deploys canary accounts first; if a canary fails, the rest of the ring is skipped,
+ *   3. deploys the rest, max N in parallel, one retry per account, and stops starting new
+ *      accounts once failures exceed the failure budget.
+ * A failed ring halts later rings. Prod (and core) only with explicit approval.
  */
 export async function runDeploy(opts: DeployOptions): Promise<Run> {
   const { config, runner, log = () => {} } = opts;
   const dir = opts.runsDir ?? defaultRunsDir;
   const retryDelayMs = opts.retryDelayMs ?? 2000;
+  const parallel = opts.maxParallel ?? MAX_PARALLEL;
   const simulate = new Set(opts.simulateTransient ?? []);
 
   const plan = accountsByRing(config, opts);
@@ -72,12 +97,23 @@ export async function runDeploy(opts: DeployOptions): Promise<Run> {
     trigger: opts.trigger,
     status: 'RUNNING',
     startedAt: now(),
-    options: { ring: opts.ring, account: opts.account, approveProd: opts.approveProd },
-    organization: opts.account ? undefined : { status: 'PENDING' },
+    options: {
+      ring: opts.ring,
+      account: opts.account,
+      approveProd: opts.approveProd,
+      approvedBy: opts.approveProd ? opts.approvedBy : undefined,
+    },
     rings: plan.map((r) => ({
       name: r.name,
       status: 'PENDING',
-      accounts: r.accounts.map((a) => ({ name: a.name, accountId: a.account_id, status: 'PENDING', attempts: 0 })),
+      organization: opts.account ? [] : ORG_STAGES_BY_RING[r.name].map((stage) => ({ stage, status: 'PENDING' })),
+      accounts: r.accounts.map((a) => ({
+        name: a.name,
+        accountId: a.account_id,
+        status: 'PENDING',
+        attempts: 0,
+        ...(a.canary ? { canary: true } : {}),
+      })),
     })),
   };
   const save = () => writeRun(run, dir);
@@ -91,55 +127,80 @@ export async function runDeploy(opts: DeployOptions): Promise<Run> {
   };
   save();
 
-  try {
-    await runner.ensureWorkspaces(run.rings.flatMap((r) => r.accounts.map((a) => a.name)));
-  } catch (e) {
-    skipFrom(run.rings, 0);
-    return finish('FAILED', message(e));
-  }
-
-  if (run.organization) {
-    const started = Date.now();
-    run.organization.status = 'RUNNING';
-    save();
-    try {
-      run.organization.changes = await runner.applyOrg();
-      run.organization.status = 'SUCCEEDED';
-      log(`[organization] SUCCEEDED ${fmtChanges(run.organization.changes)}`);
-    } catch (e) {
-      run.organization.status = 'FAILED';
-      run.organization.error = message(e);
-      log(`[organization] FAILED ${message(e)}`);
-    }
-    run.organization.durationMs = Date.now() - started;
-    if (run.organization.status === 'FAILED') {
-      skipFrom(run.rings, 0);
-      return finish('FAILED', 'Organization stage failed');
-    }
-    save();
-  }
-
   for (const [index, ring] of run.rings.entries()) {
     if (ring.name === 'prod' && !opts.approveProd) {
-      skipFrom(run.rings, index);
-      log('[prod] SKIPPED (no --approve-prod)');
-      break;
+      skipFrom(run.rings, index, 'Awaiting production approval');
+      log('[prod] SKIPPED (awaiting production approval)');
+      return finish('PARTIAL', 'Prod not approved: Root/core and Prod were not deployed');
     }
     ring.status = 'RUNNING';
     save();
 
-    const limit = pLimit(MAX_PARALLEL);
-    await Promise.all(ring.accounts.map((step) => limit(() => deployAccount(step, ring.name))));
+    for (const step of ring.organization) {
+      await applyOrgStage(step);
+      if (step.status === 'FAILED') {
+        ring.status = 'FAILED';
+        skipSteps(ring.accounts, `Organization stage ${step.stage} failed`);
+        skipFrom(run.rings, index + 1, `Ring ${ring.name} failed`);
+        return finish('HALTED', `Organization stage ${step.stage} failed; later rings skipped`);
+      }
+    }
+
+    const canaries = ring.accounts.filter((a) => a.canary);
+    const rest = ring.accounts.filter((a) => !a.canary);
+    await runWave(canaries, 0, ring.name);
+    if (canaries.some((a) => a.status === 'FAILED')) {
+      skipSteps(rest, 'Canary failed');
+    } else {
+      await runWave(rest, Math.floor(rest.length * FAILURE_BUDGET), ring.name);
+    }
 
     if (ring.accounts.some((a) => a.status === 'FAILED')) {
       ring.status = 'FAILED';
-      skipFrom(run.rings, index + 1);
+      skipFrom(run.rings, index + 1, `Ring ${ring.name} failed`);
       return finish('HALTED', `Ring ${ring.name} failed; later rings skipped`);
     }
     ring.status = 'SUCCEEDED';
     save();
   }
   return finish('SUCCEEDED');
+
+  async function applyOrgStage(step: OrgStep): Promise<void> {
+    const started = Date.now();
+    step.status = 'RUNNING';
+    save();
+    try {
+      step.changes = await runner.applyOrg(step.stage as OrgStage);
+      step.status = 'SUCCEEDED';
+      log(`[organization/${step.stage}] SUCCEEDED ${fmtChanges(step.changes)}`);
+    } catch (e) {
+      step.status = 'FAILED';
+      step.error = message(e);
+      log(`[organization/${step.stage}] FAILED ${step.error}`);
+    }
+    step.durationMs = Date.now() - started;
+    save();
+  }
+
+  /** Deploys a wave; once failures exceed the budget, accounts not yet started are skipped. */
+  async function runWave(steps: AccountStep[], budget: number, ringName: string): Promise<void> {
+    const limit = pLimit(parallel);
+    let failures = 0;
+    await Promise.all(
+      steps.map((step) =>
+        limit(async () => {
+          if (failures > budget) {
+            step.status = 'SKIPPED';
+            step.error = `Not started: failure budget exceeded (${failures} failed, budget ${budget})`;
+            save();
+            return;
+          }
+          await deployAccount(step, ringName);
+          if (step.status === 'FAILED') failures++;
+        }),
+      ),
+    );
+  }
 
   async function deployAccount(step: AccountStep, ringName: string): Promise<void> {
     const started = Date.now();
@@ -176,10 +237,19 @@ export async function runDeploy(opts: DeployOptions): Promise<Run> {
 
 export interface DriftOptions extends Common {}
 
-/** terraform plan -detailed-exitcode per deployed account: 0 = in sync, 2 = drifted. */
+/** module.network.local_file.network -> network; local_file.organization -> organization */
+function components(addresses: string[]): string[] {
+  return [...new Set(addresses.map((addr) => /^module\.([a-z_]+)[.[]/.exec(addr)?.[1] ?? addr.split('.')[1]).filter(Boolean))];
+}
+
+/**
+ * terraform plan -detailed-exitcode per deployed organization stage and account: 0 = in sync, 2 = drifted.
+ * Organization stages also drift when a governance exception expires (its SCP exemption must be removed).
+ */
 export async function runDrift(opts: DriftOptions): Promise<Run> {
   const { config, runner, log = () => {} } = opts;
   const dir = opts.runsDir ?? defaultRunsDir;
+  const stages = ORG_STAGES.filter((s) => runner.hasOrgState(s));
   const accounts = Object.values(config.accounts)
     .filter((a) => runner.hasState(a.name))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -196,30 +266,30 @@ export async function runDrift(opts: DriftOptions): Promise<Run> {
   };
   writeRun(run, dir);
 
-  const limit = pLimit(MAX_PARALLEL);
+  const targets = [
+    ...stages.map((s) => ({ name: `organization/${s}`, accountId: '', kind: 'organization' as const, plan: () => runner.planOrg(s) })),
+    ...accounts.map((a) => ({ name: a.name, accountId: a.account_id, kind: 'account' as const, plan: () => runner.planAccount(a.name) })),
+  ];
+  const limit = pLimit(opts.maxParallel ?? MAX_PARALLEL);
   const results = await Promise.all(
-    accounts.map((a) =>
+    targets.map((t) =>
       limit(async (): Promise<DriftResult> => {
-        try {
-          const plan = await runner.planAccount(a.name);
-          const components = [
-            ...new Set(
-              plan.addresses
-                .map((addr) => /^module\.([a-z]+)\./.exec(addr)?.[1])
-                .filter((c): c is string => c !== undefined),
-            ),
-          ];
-          const result: DriftResult = {
-            name: a.name,
-            accountId: a.account_id,
-            status: plan.changed ? 'DRIFTED' : 'IN_SYNC',
-            components,
-          };
-          log(`[drift] ${a.name} ${result.status}${components.length ? ` (${components.join(', ')})` : ''}`);
-          return result;
-        } catch (e) {
-          log(`[drift] ${a.name} ERROR ${message(e)}`);
-          return { name: a.name, accountId: a.account_id, status: 'ERROR', components: [], error: message(e) };
+        const base = { name: t.name, accountId: t.accountId, kind: t.kind };
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const plan = await t.plan();
+            const result: DriftResult = { ...base, status: plan.changed ? 'DRIFTED' : 'IN_SYNC', components: components(plan.addresses) };
+            log(`[drift] ${t.name} ${result.status}${result.components.length ? ` (${result.components.join(', ')})` : ''}`);
+            return result;
+          } catch (e) {
+            // Same retry policy as apply: transient errors (throttling, provider start-up) get one more attempt.
+            if (attempt < MAX_ATTEMPTS) {
+              log(`[drift] ${t.name} attempt ${attempt} failed, retrying: ${message(e)}`);
+              continue;
+            }
+            log(`[drift] ${t.name} ERROR ${message(e)}`);
+            return { ...base, status: 'ERROR', components: [], error: message(e) };
+          }
         }
       }),
     ),

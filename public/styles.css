@@ -180,7 +180,6 @@ label.check { display: inline-flex; gap: 6px; align-items: center; font-size: 14
 
 /* ---------- Pipeline ---------- */
 .run-head { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 14px; }
-.stage-org { margin-bottom: 14px; }
 .rings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .ring { border-radius: 10px; border: 1px solid var(--border); background: #fbfcfd; }
 .ring-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 10px 10px 0 0; color: #fff; font-weight: 700; }
@@ -188,6 +187,7 @@ label.check { display: inline-flex; gap: 6px; align-items: center; font-size: 14
 .ring-test .ring-head { background: var(--test); }
 .ring-prod .ring-head { background: var(--prod); }
 .ring-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; min-height: 80px; }
+.ring-counts { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 13px; font-weight: 600; }
 .tile { border-radius: 8px; border: 1px solid var(--border); border-left-width: 6px; background: #fff; padding: 10px 12px; }
 .tile .name { font-weight: 700; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 .tile .meta { font-size: 12px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
@@ -232,6 +232,20 @@ label.check { display: inline-flex; gap: 6px; align-items: center; font-size: 14
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
 }
 .toast.error { background: var(--fail); }
+
+dialog.approval {
+  border: 1px solid var(--border);
+  border-top: 6px solid var(--prod);
+  border-radius: 10px;
+  padding: 20px 24px;
+  width: min(460px, 92vw);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+dialog.approval::backdrop { background: rgba(11, 37, 69, 0.45); }
+dialog.approval p { margin: 0 0 14px; color: var(--muted); }
+label.approver { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; margin-bottom: 16px; }
+label.approver input { font: inherit; font-size: 14px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; }
+dialog.approval .toolbar { margin: 0; justify-content: flex-end; }
 
 @media (max-width: 1100px) {
   .cards { grid-template-columns: repeat(3, 1fr); }

@@ -12,7 +12,7 @@
     "start": "tsx src/server.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "tf:init": "terraform -chdir=terraform/organization init -input=false && terraform -chdir=terraform/account init -input=false",
+    "tf:init": "terraform -chdir=terraform/organization init -input=false -reconfigure && terraform -chdir=terraform/account init -input=false -reconfigure",
     "demo:reset": "tsx src/cli.ts seed --reset-demo-config"
   },
   "dependencies": {

@@ -58,6 +58,28 @@ rules:
     checks:
       - { scp: ProtectSecurityTooling }
 
+  # Shared services: IDs of the core accounts in config/organization.yaml.
+  - id: ORG-09
+    title: Logs delivered to the log archive account
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.logging.destination_account, equals: "110000000001" }
+
+  - id: ORG-10
+    title: Security findings delegated to the audit account
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.security_admin, equals: "110000000002" }
+
+  - id: ORG-11
+    title: Attached to the shared Transit Gateway
+    environments: [dev, test, prod]
+    severity: medium
+    checks:
+      - { path: network.tgw_owner, equals: "120000000001" }
+
   - id: DEV-01
     title: Large instances denied in Dev
     environments: [dev]

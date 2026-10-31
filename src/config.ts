@@ -2,10 +2,17 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import { configDir as defaultConfigDir, policiesDir as defaultPoliciesDir } from './env.js';
+import { configDir as defaultConfigDir, policiesDir as defaultPoliciesDir, syntheticDir as defaultSyntheticDir } from './env.js';
 
 export const ENVIRONMENTS = ['dev', 'test', 'prod'] as const;
 export type EnvName = (typeof ENVIRONMENTS)[number];
+
+/** Organization stages (workspaces of terraform/organization). core = Root and shared OUs. */
+export const ORG_STAGES = ['core', ...ENVIRONMENTS] as const;
+export type OrgStage = (typeof ORG_STAGES)[number];
+
+/** Who approved a Prod deployment (free text, recorded in the run file). */
+export const APPROVER = /^[A-Za-z0-9][A-Za-z0-9 ._@:\/()-]{1,59}$/;
 
 export const SCP_STATEMENTS = [
   'DenyLeaveOrganization',
@@ -37,6 +44,9 @@ const OrganizationSchema = z
     core_accounts: z.array(
       z.object({ id: AccountId, name: z.string().regex(ACCOUNT_NAME), ou: z.string() }).strict(),
     ),
+    shared_services: z
+      .object({ log_archive: z.string(), security_tooling: z.string(), network_hub: z.string() })
+      .strict(),
   })
   .strict();
 
@@ -72,6 +82,8 @@ const AccountSchema = z
     business_unit: z.string().min(1),
     cost_center: z.string().min(1),
     network_index: z.number().int().min(1).max(255),
+    /** Deployed first in its ring; the rest of the ring waits for it. */
+    canary: z.boolean().optional(),
     overrides: SettingsSchema.partial().default({}),
   })
   .strict();
@@ -111,7 +123,7 @@ export type Settings = z.infer<typeof SettingsSchema>;
 export type Organization = z.infer<typeof OrganizationSchema>;
 export type GlobalConfig = z.infer<typeof GlobalSchema>;
 export type Environment = z.infer<typeof EnvironmentSchema>;
-export type Account = z.infer<typeof AccountSchema> & { name: string };
+export type Account = z.infer<typeof AccountSchema> & { name: string; synthetic?: boolean };
 export type GovernanceException = z.infer<typeof ExceptionSchema>;
 export type Check = z.infer<typeof CheckSchema>;
 export type Rule = z.infer<typeof RuleSchema>;
@@ -134,9 +146,11 @@ export class ConfigError extends Error {
 export interface ConfigDirs {
   configDir: string;
   policiesDir: string;
+  /** Optional generated accounts (scale demo). */
+  syntheticDir?: string;
 }
 
-const defaultDirs: ConfigDirs = { configDir: defaultConfigDir, policiesDir: defaultPoliciesDir };
+const defaultDirs: ConfigDirs = { configDir: defaultConfigDir, policiesDir: defaultPoliciesDir, syntheticDir: defaultSyntheticDir };
 
 /** Loads, schema-validates and cross-checks all configuration. Throws ConfigError listing every problem. */
 export function loadConfig(dirs: ConfigDirs = defaultDirs): Config {
@@ -201,6 +215,21 @@ export function loadConfig(dirs: ConfigDirs = defaultDirs): Config {
     const a = read(path.join(dirs.configDir, 'accounts', f), AccountSchema);
     if (a) accounts[name] = { ...a, name };
   }
+  if (dirs.syntheticDir) {
+    for (const f of yamlFiles(dirs.syntheticDir)) {
+      const name = f.replace(/\.yaml$/, '');
+      if (!ACCOUNT_NAME.test(name)) {
+        problems.push(`synthetic/${f}: file name must be a valid account name (${ACCOUNT_NAME})`);
+        continue;
+      }
+      if (accounts[name]) {
+        problems.push(`synthetic/${f}: name clashes with config/accounts/${f}`);
+        continue;
+      }
+      const a = read(path.join(dirs.syntheticDir, f), AccountSchema);
+      if (a) accounts[name] = { ...a, name, synthetic: true };
+    }
+  }
 
   if (problems.length > 0) throw new ConfigError(problems);
 
@@ -237,6 +266,11 @@ function crossCheck(cfg: Config): string[] {
     if (!ous[core.ou]) problems.push(`organization.yaml: core account ${core.name} is in unknown OU ${core.ou}`);
     if (cfg.accounts[core.name]) problems.push(`accounts/${core.name}.yaml: name clashes with a core account`);
     claimId(core.id, core.name);
+  }
+  for (const [role, name] of Object.entries(cfg.organization.shared_services)) {
+    if (!cfg.organization.core_accounts.some((c) => c.name === name)) {
+      problems.push(`organization.yaml: shared_services.${role} refers to unknown core account ${name}`);
+    }
   }
 
   for (const [env, e] of Object.entries(cfg.environments)) {

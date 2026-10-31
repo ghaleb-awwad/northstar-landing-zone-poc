@@ -10,6 +10,8 @@ export const lzDir = path.join(repoRoot, '.lz');
 export const estateDir = path.join(lzDir, 'estate');
 export const stateDir = path.join(lzDir, 'state');
 export const runsDir = path.join(lzDir, 'runs');
+/** Generated accounts for the scale demo (lz seed --synthetic). Never committed. */
+export const syntheticDir = path.join(lzDir, 'synthetic', 'accounts');
 
 /** Terraform on Windows accepts forward slashes everywhere; backslashes break HCL string escapes. */
 export function toTfPath(p: string): string {
@@ -32,4 +34,10 @@ export function simulatedTransientAccounts(): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/** Accounts deployed in parallel per ring (LZ_MAX_PARALLEL, default 3). */
+export function maxParallel(): number {
+  const n = Number(process.env.LZ_MAX_PARALLEL ?? 3);
+  return Number.isInteger(n) && n >= 1 && n <= 32 ? n : 3;
 }

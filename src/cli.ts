@@ -1,7 +1,9 @@
+import { appendFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 import { parseArgs } from 'node:util';
-import { ConfigError, ENVIRONMENTS, loadConfig, type EnvName } from './config.js';
-import { demoMode, loadEnv, simulatedTransientAccounts } from './env.js';
-import { resetDemoConfig, seedLegacy, tamper } from './estate.js';
+import { APPROVER, ConfigError, ENVIRONMENTS, loadConfig, ORG_STAGES, type EnvName } from './config.js';
+import { demoMode, loadEnv, maxParallel, simulatedTransientAccounts } from './env.js';
+import { resetDemoConfig, seedLegacy, seedSynthetic, tamper } from './estate.js';
 import { fmtChanges, runDeploy, runDrift } from './pipeline.js';
 import { evaluateAll, type AccountCompliance } from './rules.js';
 import { newRunId, readRun, RUN_ID, writeRun, type Run, type RunTrigger } from './runs.js';
@@ -13,13 +15,17 @@ const USAGE = `Usage: npm run lz -- <command> [options]
 
 Commands:
   validate                         Validate all configuration
-  plan    [--account <name>]       Terraform plan for the organization and each account
-  apply   [--ring dev|test|prod] [--account <name>] [--approve-prod]
-                                   Roll out: organization, then dev -> test -> prod
-  drift                            Detect drift (terraform plan -detailed-exitcode per account)
+  plan    [--account <name>]       Terraform plan for the organization stages and each account
+  apply   [--ring dev|test|prod] [--account <name>] [--approve-prod [--approved-by <name>]]
+                                   Roll out ring by ring: dev -> test -> prod (+ Root/core)
+  drift                            Detect drift (terraform plan -detailed-exitcode per stage and account)
   evaluate [--markdown]            Compliance per account
-  seed    [--reset-demo-config]    Reset .lz/ and create the legacy (unmanaged) estate
-  tamper  --account <name>         Demo only: simulate a manual console change`;
+  seed    [--reset-demo-config] [--synthetic <n>]
+                                   Reset .lz/ and create the legacy (unmanaged) estate;
+                                   --synthetic adds <n> generated accounts (scale demo)
+  tamper  --account <name>         Demo only: simulate a manual console change
+
+Environment: LZ_MAX_PARALLEL (default 3) accounts deployed in parallel per ring.`;
 
 const { values: opts, positionals } = parseArgs({
   allowPositionals: true,
@@ -27,10 +33,12 @@ const { values: opts, positionals } = parseArgs({
     account: { type: 'string' },
     ring: { type: 'string' },
     'approve-prod': { type: 'boolean', default: false },
+    'approved-by': { type: 'string' },
     'run-id': { type: 'string' },
     trigger: { type: 'string' },
     markdown: { type: 'boolean', default: false },
     'reset-demo-config': { type: 'boolean', default: false },
+    synthetic: { type: 'string' },
     help: { type: 'boolean', default: false },
   },
 });
@@ -54,6 +62,24 @@ function ringOption(): EnvName | undefined {
   if (r === undefined) return undefined;
   if (!(ENVIRONMENTS as readonly string[]).includes(r)) throw new Error(`Invalid --ring: ${r} (expected ${ENVIRONMENTS.join('|')})`);
   return r as EnvName;
+}
+
+/** Who approved Prod: --approved-by, else the GitHub environment (CI) or the local user. */
+function approverOption(): string | undefined {
+  if (!opts['approve-prod']) {
+    if (opts['approved-by']) throw new Error('--approved-by requires --approve-prod');
+    return undefined;
+  }
+  const fallback = process.env.GITHUB_ACTIONS === 'true' ? 'github-environment:production' : `cli:${userInfo().username}`;
+  const who = opts['approved-by'] ?? fallback;
+  if (!APPROVER.test(who)) throw new Error(`Invalid --approved-by: ${who}`);
+  return who;
+}
+
+/** Appends to a GitHub Actions file (GITHUB_OUTPUT / GITHUB_STEP_SUMMARY) when running in CI. */
+function githubFile(variable: 'GITHUB_OUTPUT' | 'GITHUB_STEP_SUMMARY', text: string): void {
+  const file = process.env[variable];
+  if (file) appendFileSync(file, text);
 }
 
 function pct(score: number | null): string {
@@ -104,11 +130,12 @@ async function main(): Promise<number> {
       const tf = new TerraformCli();
       const names = opts.account ? [opts.account] : Object.keys(cfg.accounts).sort();
       for (const n of names) if (!cfg.accounts[n]) throw new Error(`Unknown account: ${n}`);
-      await tf.ensureWorkspaces(names);
       const rows: Record<string, string | number>[] = [];
       if (!opts.account) {
-        const p = await tf.planOrg();
-        rows.push({ target: 'organization', ...p.changes, status: p.changed ? 'CHANGES' : 'NO CHANGES' });
+        for (const stage of ORG_STAGES) {
+          const p = await tf.planOrg(stage);
+          rows.push({ target: `organization/${stage}`, ...p.changes, status: p.changed ? 'CHANGES' : 'NO CHANGES' });
+        }
       }
       for (const n of names) {
         const p = await tf.planAccount(n);
@@ -128,18 +155,41 @@ async function main(): Promise<number> {
         ring: ringOption(),
         account: opts.account,
         approveProd: opts['approve-prod'] ?? false,
+        approvedBy: approverOption(),
+        maxParallel: maxParallel(),
         simulateTransient: simulatedTransientAccounts(),
         log,
       });
-      if (run.organization?.changes) console.log(`organization: ${fmtChanges(run.organization.changes)}`);
-      return run.status === 'SUCCEEDED' ? 0 : 1;
+      for (const ring of run.rings) {
+        for (const o of ring.organization) if (o.changes) console.log(`organization/${o.stage}: ${fmtChanges(o.changes)}`);
+      }
+      return run.status === 'SUCCEEDED' || run.status === 'PARTIAL' ? 0 : 1;
     }
 
     case 'drift': {
       const cfg = loadConfig();
-      const run = await runDrift({ config: cfg, runner: new TerraformCli(), runId: runIdOption(), trigger: triggerOption(), log });
-      const drifted = run.drift?.filter((d) => d.status !== 'IN_SYNC').length ?? 0;
-      console.log(`${run.drift?.length ?? 0} accounts checked, ${drifted} drifted or failed.`);
+      const run = await runDrift({
+        config: cfg,
+        runner: new TerraformCli(),
+        runId: runIdOption(),
+        trigger: triggerOption(),
+        maxParallel: maxParallel(),
+        log,
+      });
+      const results = run.drift ?? [];
+      const drifted = results.filter((d) => d.status !== 'IN_SYNC');
+      console.log(`${results.length} targets checked, ${drifted.length} drifted or failed.`);
+      githubFile('GITHUB_OUTPUT', `drifted=${drifted.length}\n`);
+      githubFile(
+        'GITHUB_STEP_SUMMARY',
+        [
+          '## Drift detection\n',
+          `${results.length} targets checked, **${drifted.length} drifted or failed**.\n`,
+          ...(drifted.length ? ['| Target | Status | Components / error |', '|---|---|---|'] : []),
+          ...drifted.map((d) => `| ${d.name} | ${d.status} | ${(d.error ?? d.components.join(', ')).replace(/[|\r\n]+/g, ' ')} |`),
+          '',
+        ].join('\n'),
+      );
       return run.status === 'SUCCEEDED' ? 0 : 1;
     }
 
@@ -152,6 +202,11 @@ async function main(): Promise<number> {
       if (opts['reset-demo-config']) for (const c of resetDemoConfig()) console.log(`Demo config: ${c}`);
       const seeded = seedLegacy(loadConfig());
       console.log(`Estate reset. Legacy (unmanaged) accounts: ${seeded.join(', ') || 'none'}.`);
+      if (opts.synthetic !== undefined) {
+        const s = seedSynthetic(Number(opts.synthetic));
+        const cfg = loadConfig();
+        console.log(`Synthetic: ${s.accounts} accounts in .lz/synthetic/accounts (${s.legacy} legacy). Estate now has ${Object.keys(cfg.accounts).length} accounts.`);
+      }
       return 0;
     }
 

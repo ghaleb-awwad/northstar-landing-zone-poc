@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { ACCOUNT_NAME } from './config.js';
-import { configDir, estateDir, stateDir, terraformDir, toTfPath } from './env.js';
+import { ACCOUNT_NAME, ORG_STAGES, type OrgStage } from './config.js';
+import { configDir, estateDir, stateDir, syntheticDir, terraformDir, toTfPath } from './env.js';
 import type { Changes } from './runs.js';
 
 export interface PlanResult {
@@ -12,14 +12,19 @@ export interface PlanResult {
   addresses: string[];
 }
 
-/** The pipeline only depends on this interface, so tests can use a fake. */
+/**
+ * The pipeline only depends on this interface, so tests can use a fake.
+ * Each account and each organization stage is its own Terraform workspace (= its own state).
+ * The local backend creates a workspace's state on first apply when TF_WORKSPACE is set,
+ * so no `terraform workspace new` round trip is needed (it would be sequential and slow at scale).
+ */
 export interface TfRunner {
-  ensureWorkspaces(names: string[]): Promise<void>;
-  applyOrg(): Promise<Changes>;
+  applyOrg(stage: OrgStage): Promise<Changes>;
+  planOrg(stage: OrgStage): Promise<PlanResult>;
   applyAccount(name: string): Promise<Changes>;
-  planOrg(): Promise<PlanResult>;
   planAccount(name: string): Promise<PlanResult>;
   hasState(name: string): boolean;
+  hasOrgState(stage: OrgStage): boolean;
 }
 
 export class TerraformError extends Error {}
@@ -86,24 +91,16 @@ function assertAccountName(name: string): void {
   if (!ACCOUNT_NAME.test(name)) throw new TerraformError(`Invalid account name: ${name}`);
 }
 
+function assertStage(stage: string): void {
+  if (!(ORG_STAGES as readonly string[]).includes(stage)) throw new TerraformError(`Invalid organization stage: ${stage}`);
+}
+
 export class TerraformCli implements TfRunner {
   private readonly vars = [
     `-var=config_dir=${toTfPath(configDir)}`,
     `-var=estate_dir=${toTfPath(estateDir)}`,
+    `-var=synthetic_dir=${toTfPath(syntheticDir)}`,
   ];
-
-  async ensureWorkspaces(names: string[]): Promise<void> {
-    const list = await exec(accountDir, ['workspace', 'list', '-no-color']);
-    if (list.code !== 0) throw new TerraformError(`terraform workspace list failed: ${list.stderr.trim()}`);
-    const existing = new Set(list.stdout.split(/\r?\n/).map((l) => l.replace('*', '').trim()).filter(Boolean));
-    // Sequential on purpose: workspace creation writes shared metadata.
-    for (const name of names) {
-      assertAccountName(name);
-      if (existing.has(name)) continue;
-      const res = await exec(accountDir, ['workspace', 'new', '-no-color', name]);
-      if (res.code !== 0) throw new TerraformError(`terraform workspace new ${name} failed: ${res.stderr.trim()}`);
-    }
-  }
 
   private async apply(cwd: string, extraVars: string[], workspace?: string): Promise<Changes> {
     const res = await exec(
@@ -134,12 +131,14 @@ export class TerraformCli implements TfRunner {
     return { changed: res.code === 2, changes: changeSummary(messages), addresses };
   }
 
-  applyOrg(): Promise<Changes> {
-    return this.apply(orgDir, []);
+  applyOrg(stage: OrgStage): Promise<Changes> {
+    assertStage(stage);
+    return this.apply(orgDir, [], stage);
   }
 
-  planOrg(): Promise<PlanResult> {
-    return this.plan(orgDir, []);
+  planOrg(stage: OrgStage): Promise<PlanResult> {
+    assertStage(stage);
+    return this.plan(orgDir, [], stage);
   }
 
   applyAccount(name: string): Promise<Changes> {
@@ -155,5 +154,10 @@ export class TerraformCli implements TfRunner {
   hasState(name: string): boolean {
     assertAccountName(name);
     return existsSync(path.join(stateDir, 'accounts', name, 'terraform.tfstate'));
+  }
+
+  hasOrgState(stage: OrgStage): boolean {
+    assertStage(stage);
+    return existsSync(path.join(stateDir, 'organization', stage, 'terraform.tfstate'));
   }
 }
