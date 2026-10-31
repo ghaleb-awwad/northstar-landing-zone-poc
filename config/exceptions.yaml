@@ -1,0 +1,8 @@
+exceptions:
+  - id: EXC-0042
+    account: ns-booking-prod
+    rule: PRD-01
+    scp_statement: DenyPublicIp
+    reason: Legacy partner integration needs a static public IP until PrivateLink migration.
+    approved_by: security-architecture
+    expires: "2027-01-31"

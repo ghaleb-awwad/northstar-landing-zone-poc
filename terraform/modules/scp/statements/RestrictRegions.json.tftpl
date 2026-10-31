@@ -1,0 +1,21 @@
+{
+  "Sid": "RestrictRegions",
+  "Effect": "Deny",
+  "NotAction": [
+    "iam:*",
+    "organizations:*",
+    "sts:*",
+    "support:*",
+    "budgets:*",
+    "cloudfront:*",
+    "route53:*",
+    "health:*"
+  ],
+  "Resource": "*",
+  "Condition": {
+    "StringNotEquals": {
+      "aws:RequestedRegion": ${jsonencode(allowed_regions)}%{ if length(exempt_accounts) > 0 },
+      "aws:PrincipalAccount": ${jsonencode(exempt_accounts)}%{ endif }
+    }
+  }
+}

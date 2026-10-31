@@ -1,0 +1,96 @@
+# Compliance rules evaluated against the (simulated) estate.
+# path: reads baseline.* / network.* / access.* from the account's estate files.
+# scp:  passes when the statement is in the account's effective SCPs (its OU + parent OUs).
+rules:
+  - id: ORG-01
+    title: CloudTrail enabled
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.security_services.cloudtrail, equals: true }
+
+  - id: ORG-02
+    title: GuardDuty enabled
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.security_services.guardduty, equals: true }
+
+  - id: ORG-03
+    title: Inspector enabled (new standard)
+    environments: [dev, test, prod]
+    severity: medium
+    checks:
+      - { path: baseline.security_services.inspector, equals: true }
+
+  - id: ORG-04
+    title: S3 Block Public Access
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.hardening.s3_block_public_access, equals: true }
+
+  - id: ORG-05
+    title: EBS encryption by default
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { path: baseline.hardening.ebs_encryption_default, equals: true }
+
+  - id: ORG-06
+    title: Mandatory tags present
+    environments: [dev, test, prod]
+    severity: medium
+    checks:
+      - { path: baseline.tags, hasKeys: [Environment, Owner, CostCenter, BusinessUnit, ManagedBy] }
+
+  - id: ORG-07
+    title: Region restriction guardrail
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { scp: RestrictRegions }
+
+  - id: ORG-08
+    title: Security tooling protected
+    environments: [dev, test, prod]
+    severity: high
+    checks:
+      - { scp: ProtectSecurityTooling }
+
+  - id: DEV-01
+    title: Large instances denied in Dev
+    environments: [dev]
+    severity: low
+    checks:
+      - { scp: DenyLargeInstances }
+
+  - id: TST-01
+    title: IAM users denied in Test
+    environments: [test]
+    severity: medium
+    checks:
+      - { scp: DenyIamUsers }
+
+  - id: PRD-01
+    title: No public IP addressing in Production
+    environments: [prod]
+    severity: critical
+    checks:
+      - { path: network.public_subnets, equals: false }
+      - { scp: DenyPublicIp }
+
+  - id: PRD-02
+    title: Backup and long log retention in Production
+    environments: [prod]
+    severity: high
+    checks:
+      - { path: baseline.backup.enabled, equals: true }
+      - { path: baseline.logging.retention_days, gte: 365 }
+
+  - id: PRD-03
+    title: Developers read-only in Production
+    environments: [prod]
+    severity: high
+    checks:
+      - { path: access.developers, equals: ReadOnlyAccess }

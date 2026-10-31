@@ -1,0 +1,14 @@
+ous:
+  Root:           { scp: [DenyLeaveOrganization, ProtectSecurityTooling, RestrictRegions] }
+  Security:       { parent: Root, scp: [] }
+  Infrastructure: { parent: Root, scp: [] }
+  Workloads:      { parent: Root, scp: [] }
+  Workloads/Dev:  { parent: Workloads, scp: [DenyLargeInstances] }
+  Workloads/Test: { parent: Workloads, scp: [DenyIamUsers] }
+  Workloads/Prod: { parent: Workloads, scp: [DenyIamUsers, DenyPublicIp] }
+
+core_accounts:
+  - { id: "110000000001", name: ns-log-archive,     ou: Security }
+  - { id: "110000000002", name: ns-audit,           ou: Security }
+  - { id: "120000000001", name: ns-network,         ou: Infrastructure }
+  - { id: "120000000002", name: ns-shared-services, ou: Infrastructure }

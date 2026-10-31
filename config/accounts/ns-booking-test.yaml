@@ -1,0 +1,7 @@
+account_id: "220000000002"
+environment: test
+owner: booking-platform@northstar.example
+business_unit: commercial
+cost_center: CC-3107
+network_index: 2
+overrides: {}

@@ -1,0 +1,4 @@
+ou: Workloads/Test
+settings: { log_retention_days: 90 }
+network:  { cidr_pool: 10.20.0.0/16, tgw_route_table: nonprod }
+access:   { developers: DeployerAccess, sre: AdministratorAccess, security: SecurityAudit }

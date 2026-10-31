@@ -1,0 +1,4 @@
+ou: Workloads/Dev
+settings: { allow_public_ip: true, log_retention_days: 30, budget_usd: 5000 }
+network:  { cidr_pool: 10.10.0.0/16, tgw_route_table: nonprod }
+access:   { developers: PowerUserAccess, sre: AdministratorAccess, security: SecurityAudit }

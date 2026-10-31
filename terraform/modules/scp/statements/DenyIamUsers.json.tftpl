@@ -1,0 +1,9 @@
+{
+  "Sid": "DenyIamUsers",
+  "Effect": "Deny",
+  "Action": ["iam:CreateUser", "iam:CreateAccessKey", "iam:CreateLoginProfile"],
+  "Resource": "*"%{ if length(exempt_accounts) > 0 },
+  "Condition": {
+    "StringNotEquals": { "aws:PrincipalAccount": ${jsonencode(exempt_accounts)} }
+  }%{ endif }
+}

@@ -1,0 +1,4 @@
+ou: Workloads/Prod
+settings: { backup_required: true, log_retention_days: 400, budget_usd: 50000 }
+network:  { cidr_pool: 10.30.0.0/16, tgw_route_table: prod }
+access:   { developers: ReadOnlyAccess, sre: ReadOnlyAccess, security: SecurityAudit }

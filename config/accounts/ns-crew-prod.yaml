@@ -1,0 +1,7 @@
+account_id: "230000000001"
+environment: prod
+owner: crew-platform@northstar.example
+business_unit: crew-operations
+cost_center: CC-4412
+network_index: 1
+overrides: {}

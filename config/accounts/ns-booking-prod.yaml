@@ -1,0 +1,8 @@
+account_id: "230000000002"
+environment: prod
+owner: booking-platform@northstar.example
+business_unit: commercial
+cost_center: CC-3107
+network_index: 2
+# Covered by exception EXC-0042 (config/exceptions.yaml)
+overrides: { allow_public_ip: true }

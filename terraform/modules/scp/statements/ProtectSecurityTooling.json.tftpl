@@ -1,0 +1,19 @@
+{
+  "Sid": "ProtectSecurityTooling",
+  "Effect": "Deny",
+  "Action": [
+    "cloudtrail:StopLogging",
+    "cloudtrail:DeleteTrail",
+    "guardduty:DeleteDetector",
+    "guardduty:DisassociateFromAdministratorAccount",
+    "config:StopConfigurationRecorder",
+    "config:DeleteConfigurationRecorder",
+    "securityhub:DisableSecurityHub",
+    "inspector2:Disable"
+  ],
+  "Resource": "*",
+  "Condition": {
+    "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::*:role/AWSControlTowerExecution" }%{ if length(exempt_accounts) > 0 },
+    "StringNotEquals": { "aws:PrincipalAccount": ${jsonencode(exempt_accounts)} }%{ endif }
+  }
+}

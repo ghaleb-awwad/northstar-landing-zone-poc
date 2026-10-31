@@ -1,0 +1,17 @@
+allowed_regions: [eu-west-1, eu-central-1, me-central-1]
+mandatory_tags: [Environment, Owner, CostCenter, BusinessUnit, ManagedBy]
+
+defaults:
+  allow_public_ip: false
+  backup_required: false
+  log_retention_days: 90
+  budget_usd: 10000
+
+security_services:
+  cloudtrail: true
+  guardduty: true
+  inspector: false
+
+hardening:
+  s3_block_public_access: true
+  ebs_encryption_default: true

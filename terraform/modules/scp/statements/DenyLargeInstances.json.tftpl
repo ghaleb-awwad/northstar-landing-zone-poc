@@ -1,0 +1,10 @@
+{
+  "Sid": "DenyLargeInstances",
+  "Effect": "Deny",
+  "Action": "ec2:RunInstances",
+  "Resource": "arn:aws:ec2:*:*:instance/*",
+  "Condition": {
+    "StringLike": { "ec2:InstanceType": ["*.8xlarge", "*.12xlarge", "*.16xlarge", "*.24xlarge", "*.metal*"] }%{ if length(exempt_accounts) > 0 },
+    "StringNotEquals": { "aws:PrincipalAccount": ${jsonencode(exempt_accounts)} }%{ endif }
+  }
+}

@@ -1,0 +1,8 @@
+# Demo: copy this file to config/accounts/ to onboard a new account.
+account_id: "210000000003"
+environment: dev
+owner: cargo-platform@northstar.example
+business_unit: cargo
+cost_center: CC-5120
+network_index: 3
+overrides: {}

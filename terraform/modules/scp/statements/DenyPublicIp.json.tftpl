@@ -1,0 +1,10 @@
+{
+  "Sid": "DenyPublicIp",
+  "Effect": "Deny",
+  "Action": "ec2:RunInstances",
+  "Resource": "arn:aws:ec2:*:*:network-interface/*",
+  "Condition": {
+    "Bool": { "ec2:AssociatePublicIpAddress": "true" }%{ if length(exempt_accounts) > 0 },
+    "StringNotEquals": { "aws:PrincipalAccount": ${jsonencode(exempt_accounts)} }%{ endif }
+  }
+}
