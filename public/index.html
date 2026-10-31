@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NorthStar Landing Zone · Governance Portal</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">✦</span>
+        <div>
+          <div class="brand-title">NorthStar Airlines</div>
+          <div class="brand-sub">Landing Zone Governance Portal</div>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="Views">
+        <a href="#overview" data-tab="overview">Overview</a>
+        <a href="#accounts" data-tab="accounts">Accounts</a>
+        <a href="#pipeline" data-tab="pipeline">Pipeline</a>
+        <a href="#governance" data-tab="governance">Governance</a>
+      </nav>
+      <div class="env-note">
+        <span class="pill">AWS estate: simulated</span>
+        <span class="pill pill-demo" id="demo-pill" hidden>Demo mode</span>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <main>
+      <section id="view-overview" class="view" hidden></section>
+      <section id="view-accounts" class="view" hidden></section>
+      <section id="view-pipeline" class="view" hidden></section>
+      <section id="view-governance" class="view" hidden></section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>
