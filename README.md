@@ -68,6 +68,18 @@ effective settings = merge(global.defaults, environments/<env>.settings, account
 
 **Make an organization-wide change:** edit one line in `config/global.yaml` (for example `inspector: true`) and run the pipeline. Every account is updated, ring by ring.
 
+Both go through the same path: pull request → checks and plan → review and merge → rollout in rings.
+
+## The three situations from the case study
+
+| Situation | Today | In this PoC |
+|---|---|---|
+| **A.** A team needs a new account | Built by hand, differently each time | Copy `demo/ns-cargo-dev.yaml` into `config/accounts/` and run the pipeline: placed in the Dev OU, baseline applied, compliant |
+| **B.** Security mandates a new control everywhere | Hundreds of manual changes, no proof | `inspector: true` in `config/global.yaml`: every account updated ring by ring, the Inspector rule passes everywhere |
+| **C.** Someone changes a Production network by hand | Unnoticed until an audit | Simulate manual change → Detect drift (exit 2, pinpoints the network component) → Re-apply restores Git |
+
+The two hand-built legacy accounts (`ns-booking-test`, `ns-booking-prod`) become compliant on the first rollout.
+
 ## How a rollout works
 
 | Ring | Organization stage(s) applied first | Then |
@@ -93,7 +105,7 @@ effective settings = merge(global.defaults, environments/<env>.settings, account
 | `npm run lz -- seed --synthetic <n>` | Scale demo: reset, then generate `<n>` (max 600) accounts in `.lz/synthetic/` (never in `config/`), 10% of them legacy |
 | `npm run demo:reset` | Reset the estate (incl. synthetic accounts) and undo the demo's config edits |
 | `npx tsx demo/dry-run.ts` | Rehearsal: runs and checks the full demo sequence against a running portal |
-| `npm test` / `npm run typecheck` | Unit tests / type check |
+| `npm test` / `npm run typecheck` | Unit tests (24, vitest) / type check |
 
 ## CI/CD
 
@@ -104,6 +116,8 @@ effective settings = merge(global.defaults, environments/<env>.settings, account
 - **Nightly (03:00 UTC) or manual `task: drift`:** `drift` checks every organization stage and account. If anything drifted (manual change, or an exception that expired), `reconcile` re-applies Git after the same `production` approval.
 - The estate is carried between runs as the `lz-estate` artifact (stand-in for an S3 backend), uploaded even when a rollout fails.
 
+**Repository settings the approval depends on:** the `production` environment must have a required reviewer, and `main` should require the `checks` job. GitHub only enforces both on public repositories, or on private repositories with GitHub Pro / Team. On a private Free repository the Prod and reconcile jobs run without waiting for approval.
+
 ## Portal
 
 `http://127.0.0.1:4000` (bound to localhost only):
@@ -112,6 +126,8 @@ effective settings = merge(global.defaults, environments/<env>.settings, account
 - **Accounts:** per-account rule results, effective settings with their source layer, network, access, SCPs, Re-apply (Prod asks for approval)
 - **Pipeline:** live ring view with organization stages and canaries (compact counts for large rings), run history, Detect drift, Simulate manual change (demo mode only)
 - **Governance:** Dev / Test / Prod comparison, OU tree with SCPs, shared services, exceptions, rule catalogue
+
+Deep links: `#overview`, `#accounts`, `#pipeline`, `#governance`, and `#accounts/<name>` opens one account's detail (for example `#accounts/ns-booking-prod`).
 
 ## Scale demo
 
@@ -122,6 +138,24 @@ npm run lz -- apply --approve-prod --approved-by you
 npm run lz -- drift
 npm start                            # portal shows 206 accounts
 npm run demo:reset                   # back to the 6-account demo
+```
+
+Measured on a laptop: 206 accounts rolled out in about 215 s with 8 in parallel, drift check of 210 targets in about 169 s, portal summary in under 1 s.
+
+## Project layout
+
+```
+config/              organization, global, environment, account and exception files (the source of truth)
+policies/rules.yaml  compliance rules evaluated per account
+terraform/
+  organization/      OU tree and SCPs, one state per stage (core, dev, test, prod)
+  account/           per-account root: one state per account
+  modules/           account-baseline, network, access, scp
+src/                 lz CLI (cli, config, pipeline, terraform, rules, runs, estate) and portal API (server)
+public/              portal UI
+test/                unit tests (pipeline, rules)
+demo/                demo account file and the dry-run rehearsal script
+.github/             pipeline workflow and shared setup action
 ```
 
 The full target design (Control Tower, AFT, OIDC, Prod waves, serverless portal) is in the presentation.
